@@ -25,13 +25,11 @@ FOLDER_ID = "1tE8CYDBCQCEeU-Kar5iQs2Pn7qfEz_S1"  # Add your Google Drive folder 
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 200
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # Sentence transformer model
-# COLLECTION_NAME = "embeddings"  # Qdrant collection name
 EMBEDDING_DIMENSION = 384  # Dimension for all-MiniLM-L6-v2 model
 PERSIST_DIRECTORY = "chroma_db"  # Local directory to store Chroma DB
 
 class DocumentProcessor:
     def __init__(self, folder_id: str, 
-                #  qdrant_url: str, qdrant_api_key: str,
                 persist_directory: str = PERSIST_DIRECTORY,
                  chunk_size: int = CHUNK_SIZE, 
                  chunk_overlap: int = CHUNK_OVERLAP):
