@@ -16,8 +16,8 @@ import PyPDF2
 import docx
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-
+from database_connection import create_chroma_connection
+import json
 
 # Configuration
 SCOPES = ['https://www.googleapis.com/auth/drive']  # Full access to Drive
@@ -55,7 +55,7 @@ class DocumentProcessor:
         )
         
         # Initialize Chroma vector store
-        self.vector_store = self._init_chroma()
+        self.vector_store = create_chroma_connection(self.embeddings)
     
         # Initialize Google Drive service
         self.drive_service = self._authenticate_drive()
@@ -82,7 +82,6 @@ class DocumentProcessor:
         """Load document metadata from storage."""
         metadata_path = os.path.join("metadata.json")
         if os.path.exists(metadata_path):
-            import json
             with open(metadata_path, 'r') as f:
                 return json.load(f)
         return {}  # Return empty dict if no metadata file exists
@@ -90,7 +89,6 @@ class DocumentProcessor:
     def _save_document_metadata(self):
         """Save document metadata to storage."""
         metadata_path = os.path.join("metadata.json")
-        import json
         with open(metadata_path, 'w') as f:
             json.dump(self.document_metadata, f)
     
@@ -172,39 +170,32 @@ class DocumentProcessor:
         
         return documents
     
-    def _init_chroma(self) -> Chroma:
-        """Initialize Chroma vector store."""
-        # Create persist directory if it doesn't exist
-        os.makedirs(self.persist_directory, exist_ok=True)
-        
-        # Initialize Chroma
-        return Chroma(
-            persist_directory=self.persist_directory,
-            embedding_function=self.embeddings
-        )
-
     def _delete_document_embeddings(self, document_id: str):
-        """Delete all embeddings for a specific document."""
+        """Delete all embeddings for a specific document and update metadata."""
         try:
-            # Get all embeddings for the document
-            results = self.vector_store._collection.get(
-                where={"document_id": document_id}
-            )
-            
+            results = self.vector_store._collection.get(where={"document_id": document_id})
             if results and results['ids']:
-                # Delete all embeddings associated with the document
-                self.vector_store._collection.delete(
-                    ids=results['ids']
-                )
+                self.vector_store._collection.delete(ids=results['ids'])
                 print(f"Successfully deleted {len(results['ids'])} embeddings for document {document_id}")
+                # Load metadata and delete the entry
+                metadata = self._load_metadata()
+                if document_id in metadata:
+                    del metadata[document_id]
+                    self._save_metadata(metadata)
+                    print(f"Deleted metadata for document {document_id}")
             else:
                 print(f"No embeddings found for document {document_id}")
-                
-            # Persist changes to disk
             self.vector_store.persist()
-            
         except Exception as e:
             print(f"Error deleting embeddings for document {document_id}: {str(e)}")
+
+    def _load_metadata(self):
+        with open('metadata.json', 'r') as file:
+            return json.load(file)
+
+    def _save_metadata(self, metadata):
+        with open('metadata.json', 'w') as file:
+            json.dump(metadata, file, indent=4)
 
     def delete_embeddings_of_deleted_documents(self, current_document_ids: List[str]):
         """Delete embeddings for documents that are no longer in the Drive folder."""
