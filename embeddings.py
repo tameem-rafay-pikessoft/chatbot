@@ -1,7 +1,6 @@
 import os
-import time
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -10,64 +9,63 @@ load_dotenv()
 # Google Drive API 
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 from io import BytesIO
 
 # Document processing
 import PyPDF2
 import docx
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Qdrant
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
-from qdrant_client.http import models
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
 
-# Configuration 
+
+# Configuration
 SCOPES = ['https://www.googleapis.com/auth/drive']  # Full access to Drive
 FOLDER_ID = "1tE8CYDBCQCEeU-Kar5iQs2Pn7qfEz_S1"  # Add your Google Drive folder ID here after sharing with the service account
-CHUNK_SIZE = 1000
+CHUNK_SIZE = 500
 CHUNK_OVERLAP = 200
-EMBEDDING_MODEL = "text-embedding-ada-002"  # OpenAI embedding model
-COLLECTION_NAME = "embeddings"  # Qdrant collection name
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # Sentence transformer model
+# COLLECTION_NAME = "embeddings"  # Qdrant collection name
+EMBEDDING_DIMENSION = 384  # Dimension for all-MiniLM-L6-v2 model
+PERSIST_DIRECTORY = "chroma_db"  # Local directory to store Chroma DB
 
 class DocumentProcessor:
-    def __init__(self, api_key: str, folder_id: str, 
-                 qdrant_url: str, qdrant_api_key: str,
+    def __init__(self, folder_id: str, 
+                #  qdrant_url: str, qdrant_api_key: str,
+                persist_directory: str = PERSIST_DIRECTORY,
                  chunk_size: int = CHUNK_SIZE, 
                  chunk_overlap: int = CHUNK_OVERLAP):
         """
         Initialize the document processor.
         
         Args:
-            api_key: OpenAI API key for embeddings
             folder_id: Google Drive folder ID to monitor
-            qdrant_url: Qdrant cloud service URL
-            qdrant_api_key: Qdrant API key
+            persist_directory: Directory to store Chroma DB
             chunk_size: Size of text chunks for embeddings
             chunk_overlap: Overlap between chunks
         """
         self.folder_id = folder_id
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        self.qdrant_url = qdrant_url
-        self.qdrant_api_key = qdrant_api_key
+        self.persist_directory = persist_directory
         
-        # Initialize embeddings
-        os.environ["OPENAI_API_KEY"] = api_key
-        self.embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+        # Initialize embedding model
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name=EMBEDDING_MODEL,
+            model_kwargs={'device': 'cpu'},
+            encode_kwargs={'normalize_embeddings': True}
+        )
         
-        # Initialize vector store
-        self.vector_store = self._initialize_vector_store()
-        
+        # Initialize Chroma vector store
+        self.vector_store = self._init_chroma()
+    
         # Initialize Google Drive service
         self.drive_service = self._authenticate_drive()
-        
+    
         # Track document metadata
         self.document_metadata = self._load_document_metadata()
     
+   
     def _authenticate_drive(self):
         """Authenticate with Google Drive API using service account."""
         # Path to your service account credentials file
@@ -81,33 +79,6 @@ class DocumentProcessor:
         
         # Build and return the Drive service
         return build('drive', 'v3', credentials=credentials)
-    
-    def _initialize_vector_store(self):
-        """Initialize or load the vector store."""
-        # Create Qdrant client for cloud
-        client = QdrantClient(
-            url=self.qdrant_url,
-            api_key=self.qdrant_api_key
-        )
-        
-        # Create collection if it doesn't exist
-        collections = client.get_collections().collections
-        collection_exists = any(col.name == COLLECTION_NAME for col in collections)
-        
-        if not collection_exists:
-            client.create_collection(
-                collection_name=COLLECTION_NAME,
-                vectors_config=models.VectorParams(
-                    size=1536,  # OpenAI embeddings dimension
-                    distance=models.Distance.COSINE
-                )
-            )
-        
-        return Qdrant(
-            client=client,
-            collection_name=COLLECTION_NAME,
-            embeddings=self.embeddings
-        )
     
     def _load_document_metadata(self) -> Dict:
         """Load document metadata from storage."""
@@ -203,17 +174,46 @@ class DocumentProcessor:
         
         return documents
     
+    def _init_chroma(self) -> Chroma:
+        """Initialize Chroma vector store."""
+        # Create persist directory if it doesn't exist
+        os.makedirs(self.persist_directory, exist_ok=True)
+        
+        # Initialize Chroma
+        return Chroma(
+            persist_directory=self.persist_directory,
+            embedding_function=self.embeddings
+        )
+
     def _delete_document_embeddings(self, document_id: str):
         """Delete all embeddings for a specific document."""
-        self.vector_store.delete(filter={"document_id": document_id})
-    
+        try:
+            # Get all embeddings for the document
+            results = self.vector_store._collection.get(
+                where={"document_id": document_id}
+            )
+            
+            if results and results['ids']:
+                # Delete all embeddings associated with the document
+                self.vector_store._collection.delete(
+                    ids=results['ids']
+                )
+                print(f"Successfully deleted {len(results['ids'])} embeddings for document {document_id}")
+            else:
+                print(f"No embeddings found for document {document_id}")
+                
+            # Persist changes to disk
+            self.vector_store.persist()
+            
+        except Exception as e:
+            print(f"Error deleting embeddings for document {document_id}: {str(e)}")
+
     def process_folder(self):
         """
         Process all documents in the folder, creating or updating embeddings as needed.
         """
         # Get all files in the folder
         files = self._get_drive_files()
-        print(files)
         updated = False
         
         for file in files:
@@ -249,13 +249,17 @@ class DocumentProcessor:
                     
                     # Chunk text
                     chunks = self._chunk_text(text, file_id, file_name)
+                    print(text)
                     
                     # Add to vector store
                     texts = [chunk["text"] for chunk in chunks]
-                    metadatas = [chunk["metadata"] for chunk in chunks]
-                    
+                    metadatas = [{"document_id": file_id, "chunk_id": i, "document_name": file_name} for i, _ in enumerate(texts)]
+
                     self.vector_store.add_texts(texts=texts, metadatas=metadatas)
-                    
+                    self.vector_store.persist()  # Make sure to persist after adding
+
+
+
                     # Update metadata
                     self.document_metadata[file_id] = {
                         'name': file_name,
@@ -281,39 +285,22 @@ class DocumentProcessor:
         
         return updated
 
+ 
+
 def main():
     """Main execution function."""
-    # Load environment variables
-    load_dotenv()
-    
-    # Debug environment variables
-    print("Environment variables:")
-    print(f"OPENAI_API_KEY: {'Set' if os.getenv('OPENAI_API_KEY') else 'Not set'}")
-    print(f"QDRANT_URL: {'Set' if os.getenv('QDRANT_URL') else 'Not set'}")
-    print(f"QDRANT_API_KEY: {'Set' if os.getenv('QDRANT_API_KEY') else 'Not set'}")
-    
-    # Get API key from environment or config
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable not set")
-    
-    # Initialize processor
-    qdrant_url = os.getenv("QDRANT_URL")
-    qdrant_api_key = os.getenv("QDRANT_API_KEY")
-    if not qdrant_url or not qdrant_api_key:
-        raise ValueError("QDRANT_URL and QDRANT_API_KEY environment variables not set")
-    
+
     processor = DocumentProcessor(
-        api_key=api_key,
         folder_id=FOLDER_ID,
-        qdrant_url=qdrant_url,
-        qdrant_api_key=qdrant_api_key,
+        persist_directory=PERSIST_DIRECTORY,
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP
     )
     
     # Process documents
     processor.process_folder()
+
+
 
 if __name__ == "__main__":
     main()
