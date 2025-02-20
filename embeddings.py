@@ -208,6 +208,14 @@ class DocumentProcessor:
         except Exception as e:
             print(f"Error deleting embeddings for document {document_id}: {str(e)}")
 
+    def delete_embeddings_of_deleted_documents(self, current_document_ids: List[str]):
+        """Delete embeddings for documents that are no longer in the Drive folder."""
+        for document_id in list(self.document_metadata.keys()):
+            if document_id not in current_document_ids:
+                print(f"Document {document_id} has been deleted from Drive. Deleting embeddings...")
+                self._delete_document_embeddings(document_id)
+                del self.document_metadata[document_id]  # Remove from metadata
+
     def process_folder(self):
         """
         Process all documents in the folder, creating or updating embeddings as needed.
@@ -215,6 +223,12 @@ class DocumentProcessor:
         # Get all files in the folder
         files = self._get_drive_files()
         updated = False
+        
+        # Get current document IDs
+        current_document_ids = [file['id'] for file in files]
+        
+        # Delete embeddings of deleted documents
+        self.delete_embeddings_of_deleted_documents(current_document_ids)
         
         for file in files:
             #print the name of file 
